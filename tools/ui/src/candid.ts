@@ -6,6 +6,7 @@ import {
 import {Principal} from '@dfinity/principal'
 import './candid.css';
 import { AuthClient } from "@dfinity/auth-client";
+import { mountJsonView } from './jsonView';
 
 declare var flamegraph: any;
 declare var d3: any;
@@ -116,6 +117,11 @@ function uint8ArrayToDisplay(array: Uint8Array | number[]) {
 function timestampToString(nanoseconds: bigint) {
   const milliseconds = Number(nanoseconds / 1000000n);
   const date = new Date(milliseconds);
+  const dateStr = date.toLocaleDateString(undefined, {
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+  });
   const timeString = date.toLocaleTimeString(undefined, {
     hour: '2-digit',
     minute: '2-digit',
@@ -123,31 +129,70 @@ function timestampToString(nanoseconds: bigint) {
     hour12: false,
   });
   const ms = date.getMilliseconds().toString().padStart(3, '0');
-  return `${timeString}.${ms}`;
+  return `${dateStr} ${timeString}.${ms}`;
 }
 
 let last_log_idx: bigint = -1n;
-export async function getCanisterLogs(canisterId: Principal, logger: any) {
+let canisterLogPermissionMessageShown = false;
+
+function isCanisterLogAccessDenied(err: unknown): boolean {
+  const s =
+    err != null && typeof err === 'object' && 'message' in err
+      ? String((err as { message: string }).message)
+      : String(err);
+  return /not allowed to access canister logs|not allowed to read logs|CanisterReject|fetch_canister_logs/i.test(
+    s
+  );
+}
+
+export async function getCanisterLogs(
+  canisterId: Principal,
+  appendLine: (line: string) => void
+) {
   try {
     const actor = getManagementCanister({ agent });
     const logs = await actor.fetch_canister_logs({ canister_id: canisterId });
     let array = logs.canister_log_records;
     const idx = array.findIndex((e) => e.idx > last_log_idx);
-    if (idx > 0) {
-      array = array.slice(idx);
+    if (idx === -1) {
+      return;
     }
+    array = array.slice(idx);
     if (array.length > 0) {
       last_log_idx = array[array.length - 1].idx;
-      const display = array.map((e) => {
+      for (const e of array) {
         const stamp = timestampToString(e.timestamp_nanos);
         const content = uint8ArrayToDisplay(e.content);
-        return `[${stamp}] ${content}`;
-      });
-      const content = display.join("<br>");
-      logger(content);
+        appendLine(`[${stamp}] ${content}`);
+      }
     }
-  } catch(err) {
-    console.warn(err);
+  } catch (err) {
+    if (isCanisterLogAccessDenied(err)) {
+      if (!canisterLogPermissionMessageShown) {
+        canisterLogPermissionMessageShown = true;
+        try {
+          const target = canisterId.toText();
+          let p = '';
+          try {
+            if (authClient && (await authClient.isAuthenticated())) {
+              p = authClient.getIdentity().getPrincipal().toText();
+            }
+          } catch {
+            /* ignore */
+          }
+          appendLine(
+            '[Canister logs] Access denied. Logs are for the canister in `?id=` (header), not the Candid UI host. A controller can run:'
+          );
+          appendLine(
+            `  dfx canister update-settings ${target} --network ic --add-controller ${p || '<YOUR_II_PRINCIPAL>'}`
+          );
+        } catch (uiErr) {
+          console.debug('getCanisterLogs permission message', uiErr);
+        }
+      }
+      return;
+    }
+    console.debug('getCanisterLogs', err);
   }
 }
 
@@ -170,17 +215,15 @@ export async function getCycles(canisterId: Principal): Promise<bigint|undefined
 
 export async function getNames(canisterId: Principal) {
   try {
-    const paths : CanisterStatus.Path[] = [{
-      kind: 'metadata',
-      path: 'name',
-      key: 'name',
-      decodeStrategy: 'raw',
-    }];
-    const status = await CanisterStatus.request({ agent, canisterId, paths });
-    const blob = status.get('name') as ArrayBuffer;
-    const decoded = IDL.decode([IDL.Vec(IDL.Tuple(IDL.Nat16, IDL.Text))], blob)[0] as Array<[number,string]>;
-    decoded.forEach(([id, name]) => names[id] = name);
-  } catch(err) {
+    const namePath = new CanisterStatus.CustomPath('name', 'name', 'raw');
+    const status = await CanisterStatus.request({ agent, canisterId, paths: [namePath] });
+    const blob = status.get('name') as ArrayBuffer | null;
+    if (!blob) {
+      return undefined;
+    }
+    const decoded = IDL.decode([IDL.Vec(IDL.Tuple(IDL.Nat16, IDL.Text))], blob)[0] as Array<[number, string]>;
+    decoded.forEach(([id, name]) => (names[id] = name));
+  } catch {
     return undefined;
   }
 }
@@ -308,9 +351,89 @@ function is_query(func: IDL.FuncClass): boolean {
   return func.annotations.includes('query') || func.annotations.includes('composite_query');
 }
 
+let canisterLogsDfxCopyHandlerAttached = false;
+
+function dfxBoxFullText(el: HTMLTextAreaElement): string {
+  return el.value;
+}
+
+function buildAddControllerCommand(canisterIdText: string, newControllerPrincipal: string) {
+  return `dfx canister update-settings ${canisterIdText} --network ic --add-controller ${newControllerPrincipal}`;
+}
+
+/** Fill the Canister logs tab with one copy-pasteable `dfx canister update-settings … --add-controller …` line. */
+function initCanisterLogsDfxTip(targetCanister: Principal) {
+  const el = document.getElementById('canister-logs-dfx-commands');
+  const copyBtn = document.getElementById('canister-logs-dfx-copy') as HTMLButtonElement | null;
+  if (!(el instanceof HTMLTextAreaElement) || !copyBtn) {
+    return;
+  }
+  const box = el;
+  const cid = targetCanister.toText();
+  const placeholderPrincipal = '<PASTE_YOUR_INTERNET_IDENTITY_PRINCIPAL>';
+
+  box.value = buildAddControllerCommand(cid, placeholderPrincipal);
+  void (async () => {
+    try {
+      if (authClient && (await authClient.isAuthenticated())) {
+        box.value = buildAddControllerCommand(
+          cid,
+          authClient.getIdentity().getPrincipal().toText()
+        );
+      }
+    } catch {
+      /* keep placeholder */
+    }
+  })();
+
+  if (!canisterLogsDfxCopyHandlerAttached) {
+    canisterLogsDfxCopyHandlerAttached = true;
+    copyBtn.addEventListener('click', (ev) => {
+      ev.preventDefault();
+      const t = dfxBoxFullText(box);
+      const done = (ok: boolean) => {
+        const prev = copyBtn.textContent;
+        copyBtn.textContent = ok ? 'Copied!' : 'Copy failed';
+        setTimeout(() => {
+          copyBtn.textContent = prev || 'Copy';
+        }, ok ? 2000 : 3000);
+      };
+      if (navigator.clipboard?.writeText) {
+        void navigator.clipboard
+          .writeText(t)
+          .then(() => done(true))
+          .catch(() => {
+            if (tryExecCommandCopyTextarea(box)) {
+              done(true);
+            } else {
+              done(false);
+            }
+          });
+      } else if (tryExecCommandCopyTextarea(box)) {
+        done(true);
+      } else {
+        done(false);
+      }
+    });
+  }
+}
+
+function tryExecCommandCopyTextarea(el: HTMLTextAreaElement): boolean {
+  try {
+    el.focus();
+    el.select();
+    return document.execCommand('copy');
+  } catch {
+    return false;
+  }
+}
+
 export function render(id: Principal, canister: ActorSubclass, profiling: bigint|undefined) {
   document.getElementById('canisterId')!.innerText = `${id}`;
-  getCanisterLogs(id, log);
+  initCanisterLogsDfxTip(id);
+  void getCanisterLogs(id, logCanister).catch((e) => {
+    console.debug('getCanisterLogs', e);
+  });
   let profiler;
   if (typeof profiling !== 'undefined') {
     log(`Wasm instructions executed ${profiling} instrs.`);
@@ -378,13 +501,13 @@ function renderMethod(canister: ActorSubclass, name: string, idlFunc: IDL.FuncCl
   const resultButtons = document.createElement('span');
   resultButtons.className = 'result-buttons';
   const buttonText = document.createElement('button');
-  buttonText.className = 'btn text-btn active';
+  buttonText.className = 'btn text-btn';
   buttonText.innerText = 'Text';
   const buttonUI = document.createElement('button');
   buttonUI.className = 'btn ui-btn';
   buttonUI.innerText = 'UI';
   const buttonJSON = document.createElement('button');
-  buttonJSON.className = 'btn json-btn';
+  buttonJSON.className = 'btn json-btn active';
   buttonJSON.innerText = 'JSON';
   const buttonsArray = [buttonText, buttonUI, buttonJSON];
 
@@ -449,9 +572,9 @@ function renderMethod(canister: ActorSubclass, name: string, idlFunc: IDL.FuncCl
       left.appendChild(textContainer);
       const text = encodeStr(IDL.FuncClass.argsToString(idlFunc.retTypes, result));
       textContainer.innerHTML = decodeSpace(text);
+      const id = Actor.canisterIdOf(canister);
+      await getCanisterLogs(id, logCanister);
       if (!is_query(idlFunc)) {
-        const id = Actor.canisterIdOf(canister);
-        await getCanisterLogs(id, log);
         postToPlayground(id);
         if (profiler) {
           await renderFlameGraph(profiler);
@@ -475,13 +598,13 @@ function renderMethod(canister: ActorSubclass, name: string, idlFunc: IDL.FuncCl
       containers.push(jsonContainer);
       jsonContainer.style.display = setContainerVisibility('json');
       left.appendChild(jsonContainer);
-      jsonContainer.innerText = JSON.stringify(callResult, (k,v) => typeof v === 'bigint'?v.toString():v);
+      mountJsonView(jsonContainer, callResult);
     })().catch(err => {
       resultDiv.classList.add('error');
       left.innerText = err.message;
+      const id = Actor.canisterIdOf(canister);
+      void getCanisterLogs(id, logCanister);
       if (!is_query(idlFunc)) {
-        const id = Actor.canisterIdOf(canister);
-        getCanisterLogs(id, log);
         postToPlayground(id);
         if (profiler) {
           log(`Error occured, flamegraph can be incomplete`);
@@ -549,5 +672,24 @@ function log(content: Element | string) {
 
   outputEl.appendChild(line);
   line.scrollIntoView();
+}
+
+function logCanister(line: string) {
+  const el = document.getElementById('canister-logs-list');
+  if (!el) {
+    return;
+  }
+  const row = document.createElement('div');
+  row.className = 'canister-log-line';
+  const escape: Record<string, string> = {
+    '&': '&amp;',
+    '<': '&lt;',
+    '>': '&gt;',
+    '\n': '<br>',
+  };
+  const safe = line.replace(/[&<>\n]/g, (c) => escape[c] ?? c);
+  row.innerHTML = safe;
+  el.appendChild(row);
+  row.scrollIntoView();
 }
 

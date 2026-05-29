@@ -65,6 +65,20 @@
                 ></path>
               </svg>
             </button>
+            <button id="logs-button" type="button" title="Canister logs">
+              <svg
+                viewBox="64 64 896 896"
+                focusable="false"
+                width="1em"
+                height="1em"
+                fill="currentColor"
+                aria-hidden="true"
+              >
+                <path
+                  d="M240 300h600v64H240V300zm0 200h600v64H240V500zm0 200h500v64H240V700z"
+                ></path>
+              </svg>
+            </button>
           </div>
           <div id="output-pane">
             <div class="console-header">Output Log</div>
@@ -73,6 +87,39 @@
           <div id="methods-pane" style="display: none">
             <div class="console-header">Methods</div>
             <ul id="methods-list"></ul>
+          </div>
+          <div id="canister-logs-pane" style="display: none">
+            <div class="console-header">Canister logs</div>
+            <p class="canister-logs-hint">
+              Log lines for the canister in <code>?id=</code> (see header). Reading logs requires
+              <code>--add-log-viewer</code> or <code>--add-controller</code> on
+              <strong>that</strong> canister (not the Candid UI host), run with an identity that is already a controller.
+            </p>
+            <div class="dfx-cli-tip-block">
+              <div class="dfx-cli-tip-label">dfx (copy and run in your project terminal, as a canister controller)</div>
+              <textarea
+                id="canister-logs-dfx-commands"
+                class="dfx-cli-tip"
+                readonly
+                rows="2"
+                spellcheck="false"
+                wrap="off"
+                aria-label="dfx add-controller command"
+              ></textarea>
+              <button type="button" id="canister-logs-dfx-copy" class="dfx-cli-copy">Copy</button>
+            </div>
+            <script>
+              (function () {
+                var el = document.getElementById("canister-logs-dfx-commands");
+                var id = new URLSearchParams(window.location.search).get("id");
+                if (!el || !id || el.tagName !== "TEXTAREA") return;
+                el.value =
+                  "dfx canister update-settings " +
+                  id +
+                  " --network ic --add-controller <PASTE_YOUR_INTERNET_IDENTITY_PRINCIPAL>";
+              })();
+            </script>
+            <div id="canister-logs-list"></div>
           </div>
         </div>
       </div>
@@ -86,11 +133,13 @@
         const consoleEl = document.getElementById('console');
         const outputButton = document.getElementById('output-button');
         const methodsButton = document.getElementById('methods-button');
+        const logsButton = document.getElementById('logs-button');
         const outputPane = document.getElementById('output-pane');
         const methodsPane = document.getElementById('methods-pane');
+        const canisterLogsPane = document.getElementById('canister-logs-pane');
 
-        const buttons = [outputButton, methodsButton];
-        const panes = [outputPane, methodsPane];
+        const tabButtons = [outputButton, methodsButton, logsButton];
+        const panes = [outputPane, methodsPane, canisterLogsPane];
 
         function openConsole() {
           if (!consoleEl.classList.contains('open')) {
@@ -100,11 +149,11 @@
         function toggleConsole() {
           if (consoleEl.classList.contains('open')) {
             consoleEl.classList.remove('open');
-            buttons.forEach(button => {
+            tabButtons.forEach((button) => {
               button.classList.remove('active-tab');
               button.blur();
             });
-            panes.forEach(pane => {
+            panes.forEach((pane) => {
               pane.style.display = 'none';
             });
           } else {
@@ -112,28 +161,25 @@
           }
         }
 
-        outputButton.addEventListener('click', () => {
-          if (outputButton.classList.contains('active-tab')) {
+        function showTab(paneIndex) {
+          const activeBtn = tabButtons[paneIndex];
+          if (activeBtn.classList.contains('active-tab')) {
             toggleConsole();
-          } else {
-            openConsole();
-            outputPane.style.display = 'block';
-            outputButton.classList.add('active-tab');
-            methodsPane.style.display = 'none';
-            methodsButton.classList.remove('active-tab');
+            return;
           }
-        });
-        methodsButton.addEventListener('click', () => {
-          if (methodsButton.classList.contains('active-tab')) {
-            toggleConsole();
-          } else {
-            openConsole();
-            methodsPane.style.display = 'block';
-            methodsButton.classList.add('active-tab');
-            outputPane.style.display = 'none';
-            outputButton.classList.remove('active-tab');
-          }
-        });
+          openConsole();
+          panes.forEach((p, i) => {
+            p.style.display = i === paneIndex ? 'block' : 'none';
+          });
+          tabButtons.forEach((b, i) => {
+            if (i === paneIndex) b.classList.add('active-tab');
+            else b.classList.remove('active-tab');
+          });
+        }
+
+        outputButton.addEventListener('click', () => showTab(0));
+        methodsButton.addEventListener('click', () => showTab(1));
+        logsButton.addEventListener('click', () => showTab(2));
         outputButton.click();
       }
     </script>
